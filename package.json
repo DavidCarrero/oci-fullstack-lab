@@ -1,0 +1,33 @@
+{
+  "name": "oci-devops-lab",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Laboratorio DevOps: Next.js + NestJS con CI/CD multi-modelo en OCI",
+  "workspaces": [
+    "apps/frontend",
+    "apps/backend"
+  ],
+  "scripts": {
+    "prepare": "husky",
+    "lint": "npm run lint --workspaces",
+    "test": "npm run test --workspaces",
+    "test:cov": "npm run test:cov --workspaces",
+    "build": "npm run build --workspaces",
+    "validate:files": "bash scripts/validate-files.sh"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "husky": "^9.1.0",
+    "lint-staged": "^15.2.0"
+  },
+  "lint-staged": {
+    "apps/**/*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "apps/**/*.{json,md,css,scss}": [
+      "prettier --write"
+    ]
+  }
+}

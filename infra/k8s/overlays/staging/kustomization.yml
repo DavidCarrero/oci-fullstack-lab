@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Hereda de base
+resources:
+  - ../../base
+
+# Prefijo para diferenciar staging de production
+namePrefix: stg-
+
+# Namespace de staging
+namespace: oci-devops-lab
+
+# Sobreescribir imagenes con las de OCIR
+# Reemplazar TENANCY con tu namespace real (ej: ax9kokncwtdj/dcarrero)
+images:
+  - name: REGISTRY/backend
+    newName: sa-bogota-1.ocir.io/TENANCY/backend
+    newTag: staging
+  - name: REGISTRY/frontend
+    newName: sa-bogota-1.ocir.io/TENANCY/frontend
+    newTag: staging
+
+# Reducir replicas para staging
+patches:
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
