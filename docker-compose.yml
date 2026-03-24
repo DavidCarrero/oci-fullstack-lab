@@ -1,0 +1,36 @@
+# docker-compose.yml
+# Uso: desarrollo local y despliegue en VM
+# Para OCI, reemplazar las imagenes con las URLs de OCIR
+
+services:
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    # En produccion/VM, usar imagen de OCIR:
+    # image: sa-bogota-1.ocir.io/${OCI_TENANCY}/backend:${IMAGE_TAG:-latest}
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile
+    # En produccion/VM, usar imagen de OCIR:
+    # image: sa-bogota-1.ocir.io/${OCI_TENANCY}/frontend:${IMAGE_TAG:-latest}
+    ports:
+      - "3001:3001"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:3000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

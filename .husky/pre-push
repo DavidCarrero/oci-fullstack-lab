@@ -1,0 +1,44 @@
+#!/bin/sh
+# Pre-push: validaciones completas antes de compartir codigo
+
+# ── Validar nombre de rama (git flow) ──────────────────────────────────────
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+if [ -z "$BRANCH" ]; then
+  echo "⚠️  No se pudo determinar el nombre de la rama, continuando..."
+else
+  VALID_PATTERN="^(main|develop|feature\/.+|bugfix\/.+|hotfix\/.+|release\/.+|chore\/.+|docs\/.+|ci\/.+)$"
+  if ! echo "$BRANCH" | grep -qE "$VALID_PATTERN"; then
+    echo "❌ Push bloqueado: la rama '$BRANCH' no sigue el estándar de git flow"
+    echo ""
+    echo "   Ramas permitidas:"
+    echo "     main        — rama principal de producción"
+    echo "     develop     — rama de integración"
+    echo "     feature/*   — nuevas funcionalidades"
+    echo "     bugfix/*    — corrección de bugs"
+    echo "     hotfix/*    — parches urgentes en producción"
+    echo "     release/*   — preparación de releases"
+    echo "     chore/*     — mantenimiento y tareas internas"
+    echo "     docs/*      — solo documentación"
+    echo "     ci/*        — cambios en CI/CD"
+    echo ""
+    echo "   Ejemplo: git checkout -b feature/nombre-de-feature"
+    exit 1
+  fi
+  echo "✅ Rama '$BRANCH' cumple el estándar de git flow"
+fi
+
+echo "🔍 Validando archivos obligatorios..."
+bash scripts/validate-files.sh
+if [ $? -ne 0 ]; then
+  echo "❌ Push bloqueado: faltan archivos obligatorios"
+  exit 1
+fi
+
+echo "🧪 Ejecutando tests unitarios..."
+npm run test --workspaces --if-present
+if [ $? -ne 0 ]; then
+  echo "❌ Push bloqueado: tests fallaron"
+  exit 1
+fi
+
+echo "✅ Todas las validaciones pasaron"

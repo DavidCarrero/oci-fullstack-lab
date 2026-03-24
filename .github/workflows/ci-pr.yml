@@ -1,0 +1,161 @@
+name: CI - Pull Request to main
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ── 1. Archivos obligatorios ──────────────────────────────────────────────
+  validate-files:
+    name: Archivos obligatorios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validar archivos requeridos
+        run: bash scripts/validate-files.sh
+
+      - name: Validar CHANGELOG actualizado
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Archivos modificados:"
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE "^apps/"; then
+            if ! echo "$CHANGED" | grep -q "CHANGELOG.md"; then
+              echo "❌ Codigo en apps/ modificado pero CHANGELOG.md no fue actualizado"
+              exit 1
+            fi
+          fi
+          echo "✅ CHANGELOG validado"
+
+  # ── 2. Lint, Tests y Build ────────────────────────────────────────────────
+  ci:
+    name: CI (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    needs: validate-files
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Instalar dependencias (workspace raiz)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+        working-directory: apps/${{ matrix.project }}
+
+      - name: Build
+        run: npm run build
+        working-directory: apps/${{ matrix.project }}
+
+      - name: Tests con cobertura
+        run: npm run test:cov
+        working-directory: apps/${{ matrix.project }}
+
+      - name: Subir reporte de cobertura
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.project }}
+          path: apps/${{ matrix.project }}/coverage/lcov.info
+          retention-days: 5
+
+  # ── 3. SonarQube Quality Gate ─────────────────────────────────────────────
+  sonarqube:
+    name: SonarQube Quality Gate
+    runs-on: ubuntu-latest
+    needs: ci
+    if: false # Activar cuando SONAR_TOKEN este configurado
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=oci-devops-lab
+            -Dsonar.sources=apps/
+            -Dsonar.test.inclusions=**/*.spec.ts,**/*.test.tsx
+            -Dsonar.javascript.lcov.reportPaths=lcov.info
+            -Dsonar.pullrequest.key=${{ github.event.pull_request.number }}
+            -Dsonar.pullrequest.branch=${{ github.head_ref }}
+            -Dsonar.pullrequest.base=${{ github.base_ref }}
+
+      - uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ── 4. AI Code Review (Claude API) ───────────────────────────────────────
+  ai-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Obtener diff del PR
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD -- apps/ | head -c 40000 > /tmp/pr-diff.txt
+          echo "diff_size=$(wc -c < /tmp/pr-diff.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Review con Claude
+        if: env.ANTHROPIC_API_KEY != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DIFF_CONTENT=$(cat /tmp/pr-diff.txt | jq -Rs .)
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-sonnet-4-20250514\",
+              \"max_tokens\": 2000,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": \"Revisa este diff de PR para un monorepo Next.js + NestJS. Enfocate en: seguridad, rendimiento, arquitectura y buenas practicas. Se conciso. Responde en espanol. Formato markdown.\\n\\nDiff:\\n\" }]
+            }" 2>/dev/null || echo '{"content":[{"text":"Review no disponible"}]}')
+
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "Review no disponible"')
+
+          curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d "$(jq -n --arg body "## 🤖 AI Code Review\n\n$REVIEW" '{body: $body}')"
