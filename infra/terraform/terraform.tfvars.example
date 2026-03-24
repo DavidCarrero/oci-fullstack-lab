@@ -1,0 +1,9 @@
+# Copiar a terraform.tfvars y completar con tus valores reales
+# NO commitear terraform.tfvars (esta en .gitignore)
+
+region         = "sa-bogota-1"
+compartment_id = "ocid1.compartment.oc1..aaaa..."
+tenancy_ocid   = "ocid1.tenancy.oc1..aaaa..."
+ocir_namespace = "ax9kokncwtdj/dcarrero"
+ssh_public_key = "ssh-rsa AAAA..."
+image_tag      = "latest"

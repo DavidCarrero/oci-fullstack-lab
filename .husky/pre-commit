@@ -1,0 +1,3 @@
+#!/bin/sh
+# Pre-commit: lint solo archivos staged (rapido, < 2s)
+npx lint-staged

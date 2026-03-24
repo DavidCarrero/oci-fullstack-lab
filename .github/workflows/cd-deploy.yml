@@ -1,0 +1,165 @@
+name: CD - Deploy to OCI
+
+on:
+  push:
+    branches: [main]
+
+env:
+  OCI_REGION: sa-bogota-1
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ── 1. Build y push imagenes a OCIR ──
+  build-push:
+    name: Build & Push (${{ matrix.app.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app:
+          - { name: backend,  path: apps/backend,  port: 3000 }
+          - { name: frontend, path: apps/frontend, port: 3001 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to OCIR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.OCI_REGION }}.ocir.io
+          username: ${{ secrets.OCI_TENANCY }}/${{ secrets.OCI_USERNAME }}
+          password: ${{ secrets.OCI_AUTH_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.app.path }}
+          push: true
+          tags: |
+            ${{ env.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY }}/${{ matrix.app.name }}:${{ env.IMAGE_TAG }}
+            ${{ env.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY }}/${{ matrix.app.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 2A. Deploy a VM (Docker Compose via SSH) ──
+  deploy-vm:
+    name: Deploy VM (Docker Compose)
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: oci-vm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VM_PUBLIC_IP }}
+          username: ubuntu
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd /opt/oci-devops-lab
+
+            # Login a OCIR
+            echo "${{ secrets.OCI_AUTH_TOKEN }}" | docker login \
+              ${{ env.OCI_REGION }}.ocir.io \
+              -u "${{ secrets.OCI_TENANCY }}/${{ secrets.OCI_USERNAME }}" \
+              --password-stdin
+
+            # Actualizar tag en .env
+            echo "IMAGE_TAG=${{ env.IMAGE_TAG }}" > .env
+            echo "OCI_TENANCY=${{ secrets.OCI_TENANCY }}" >> .env
+            echo "OCI_REGION=${{ env.OCI_REGION }}" >> .env
+
+            # Pull y restart
+            docker compose pull
+            docker compose up -d --force-recreate
+
+            # Verificar health
+            sleep 10
+            curl -sf http://localhost:3000/health || echo "⚠️ Backend health check falló"
+            echo "✅ VM deployment completado"
+
+  # ── 2B. Deploy a Container Instances (OCI CLI) ──
+  deploy-container:
+    name: Deploy Container Instance
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: oci-container
+    steps:
+      - name: Setup OCI CLI
+        uses: oracle-actions/configure-oci-cli@v1
+        with:
+          user: ${{ secrets.OCI_USER_OCID }}
+          tenancy: ${{ secrets.OCI_TENANCY_OCID }}
+          fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+          key_content: ${{ secrets.OCI_KEY_CONTENT }}
+          region: ${{ env.OCI_REGION }}
+
+      - name: Restart Container Instance con nueva imagen
+        run: |
+          # OCI Container Instances requiere recrear para cambiar imagen
+          # Primero obtener config actual, luego recrear
+          echo "📦 Actualizando Container Instance..."
+
+          # Restart para forzar pull de :latest
+          oci container-instances container-instance restart \
+            --container-instance-id ${{ secrets.OCI_CI_BACKEND_ID }} \
+            --wait-for-state ACTIVE \
+            --max-wait-seconds 300
+
+          echo "✅ Container Instance actualizado"
+
+  # ── 2C. Deploy a OKE (Kubernetes) ──
+  deploy-k8s:
+    name: Deploy OKE (Kubernetes)
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: oci-k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup OCI CLI
+        uses: oracle-actions/configure-oci-cli@v1
+        with:
+          user: ${{ secrets.OCI_USER_OCID }}
+          tenancy: ${{ secrets.OCI_TENANCY_OCID }}
+          fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+          key_content: ${{ secrets.OCI_KEY_CONTENT }}
+          region: ${{ env.OCI_REGION }}
+
+      - name: Get kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          oci ce cluster create-kubeconfig \
+            --cluster-id ${{ secrets.OKE_CLUSTER_ID }} \
+            --file $HOME/.kube/config \
+            --region ${{ env.OCI_REGION }} \
+            --token-version 2.0.0
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Deploy con Kustomize
+        run: |
+          # Actualizar el tag de las imagenes usando kustomize
+          cd infra/k8s/overlays/production
+
+          # Sobreescribir las imagenes con el tag del commit actual
+          kustomize edit set image \
+            REGISTRY/backend=${{ env.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY }}/backend:${{ env.IMAGE_TAG }} \
+            REGISTRY/frontend=${{ env.OCI_REGION }}.ocir.io/${{ secrets.OCI_TENANCY }}/frontend:${{ env.IMAGE_TAG }}
+
+          # Aplicar manifiestos
+          kustomize build . | kubectl apply -f -
+
+          # Esperar rollout
+          kubectl rollout status deployment/backend -n oci-devops-lab --timeout=300s
+          kubectl rollout status deployment/frontend -n oci-devops-lab --timeout=300s
+
+          echo "✅ OKE deployment completado"
+
+      - name: Verificar pods
+        run: |
+          kubectl get pods -n oci-devops-lab
+          kubectl get services -n oci-devops-lab

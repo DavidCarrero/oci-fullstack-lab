@@ -1,0 +1,44 @@
+name: CI - Push validation
+
+on:
+  push:
+    branches-ignore: [main]
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  validate-files:
+    name: Archivos obligatorios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validar archivos
+        run: bash scripts/validate-files.sh
+
+  ci:
+    name: Lint, Test & Build (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: apps/${{ matrix.project }}/package-lock.json
+
+      - run: npm ci
+        working-directory: apps/${{ matrix.project }}
+
+      - run: npm run lint
+        working-directory: apps/${{ matrix.project }}
+
+      - run: npm run test
+        working-directory: apps/${{ matrix.project }}
+
+      - run: npm run build
+        working-directory: apps/${{ matrix.project }}
