@@ -1,3 +1,5 @@
+import './globals.css';
+
 export const metadata = {
   title: 'OCI DevOps Lab',
   description: 'Demo de pipeline CI/CD multi-modelo en Oracle Cloud',
